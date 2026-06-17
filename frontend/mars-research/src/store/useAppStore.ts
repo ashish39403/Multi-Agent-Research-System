@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { persist } from 'zustand/middleware';  // ✅ Add this import
+import { persist } from 'zustand/middleware';
 import { Agent, ResearchHistoryItem, ResearchPhase, AppSettings, AgentStatus, LogEntry } from '../types';
 import {
   MOCK_HISTORY,
@@ -37,6 +37,7 @@ interface AppState {
   deleteHistoryItem: (id: string) => void;
   clearHistory: () => void;
   currentResearchId: string | null;
+  startTime: number | null;
 }
 
 const DEFAULT_AGENTS: Agent[] = [
@@ -71,7 +72,6 @@ const DEFAULT_AGENTS: Agent[] = [
 
 let activePollInterval: number | null = null;
 
-// ✅ Add persist middleware
 export const useAppStore = create<AppState>()(
   persist(
     (set, get) => ({
@@ -98,6 +98,7 @@ export const useAppStore = create<AppState>()(
       history: MOCK_HISTORY,
       activeHistoryId: null,
       currentResearchId: null,
+      startTime: null,
 
       settings: {
         researchDepth: 'standard',
@@ -120,6 +121,7 @@ export const useAppStore = create<AppState>()(
           query: '',
           activeHistoryId: null,
           currentResearchId: null,
+          startTime: null,
           agents: DEFAULT_AGENTS.map((agent) => ({
             ...agent,
             status: 'idle' as AgentStatus,
@@ -129,12 +131,9 @@ export const useAppStore = create<AppState>()(
         });
       },
 
-      // ✅ Delete with force save
       deleteHistoryItem: (id: string) => {
         set((state) => {
           const newHistory = state.history.filter((item) => item.id !== id);
-          
-          // ✅ Save to localStorage directly
           try {
             const data = {
               state: {
@@ -148,15 +147,12 @@ export const useAppStore = create<AppState>()(
           } catch (error) {
             console.error('Failed to save:', error);
           }
-          
           return { history: newHistory };
         });
       },
 
-      // ✅ Clear with force save
       clearHistory: () => {
         set((state) => {
-          // ✅ Save to localStorage directly
           try {
             const data = {
               state: {
@@ -170,7 +166,6 @@ export const useAppStore = create<AppState>()(
           } catch (error) {
             console.error('Failed to save:', error);
           }
-          
           return { history: [] };
         });
       },
@@ -197,11 +192,14 @@ export const useAppStore = create<AppState>()(
 
         resetResearch();
 
+        const startTime = Date.now();
+
         set({
           phase: 'searching',
           result: null,
           activeHistoryId: null,
           currentResearchId: null,
+          startTime: startTime,
           agents: DEFAULT_AGENTS.map((agent) => ({
             ...agent,
             status: 'idle' as AgentStatus,
@@ -253,7 +251,7 @@ export const useAppStore = create<AppState>()(
                   return {
                     ...agent,
                     status: 'processing' as AgentStatus,
-                    progress: 20,
+                    progress: 5,
                     logs: [createLog('📖 Starting to analyze sources...', 'info')]
                   };
                 }
@@ -271,28 +269,13 @@ export const useAppStore = create<AppState>()(
                   set((state) => ({
                     phase: 'complete',
                     result: result.final_report,
-                    agents: state.agents.map((agent) => {
-                      if (agent.id === 'reader') {
-                        return {
-                          ...agent,
-                          status: 'completed' as AgentStatus,
-                          progress: 100,
-                          logs: [...agent.logs, createLog('✅ Analysis complete. Key insights extracted.', 'success')]
-                        };
-                      }
-                      if (agent.id === 'writer') {
-                        return {
-                          ...agent,
-                          status: 'completed' as AgentStatus,
-                          progress: 100,
-                          logs: [...agent.logs, createLog('✍️ Report generation complete!', 'success')]
-                        };
-                      }
-                      return agent;
-                    }),
+                    agents: state.agents.map((agent) => ({
+                      ...agent,
+                      status: 'completed' as AgentStatus,
+                      progress: 100
+                    })),
                   }));
 
-                  // Save to history
                   const newItem: ResearchHistoryItem = {
                     id: Date.now().toString(),
                     title: query.length > 40 ? query.slice(0, 40) + '…' : query,
@@ -319,68 +302,103 @@ export const useAppStore = create<AppState>()(
                   }
                 }
                 else {
-                  // Update progress dynamically
+                  // ✅ REAL PROGRESS - Based on elapsed time
                   set((state) => {
+                    const elapsed = (Date.now() - (state.startTime || Date.now())) / 1000;
                     const newAgents = [...state.agents];
                     let newPhase = state.phase;
 
                     const readerIndex = newAgents.findIndex(a => a.id === 'reader');
                     const writerIndex = newAgents.findIndex(a => a.id === 'writer');
 
-                    if (readerIndex !== -1 && state.phase === 'reading') {
-                      const currentProgress = newAgents[readerIndex].progress;
-                      const newProgress = Math.min(80, currentProgress + 15);
+                    // ✅ READER: 0% → 100% in 30 seconds
+                    if (readerIndex !== -1) {
+                      let readerProgress = 0;
+                      if (elapsed < 10) {
+                        readerProgress = (elapsed / 10) * 40;
+                      } else if (elapsed < 25) {
+                        readerProgress = 40 + ((elapsed - 10) / 15) * 45;
+                      } else if (elapsed < 30) {
+                        readerProgress = 85 + ((elapsed - 25) / 5) * 15;
+                      } else {
+                        readerProgress = 100;
+                      }
+                      readerProgress = Math.min(100, readerProgress);
+                      
                       newAgents[readerIndex] = {
                         ...newAgents[readerIndex],
-                        progress: newProgress,
+                        progress: Math.round(readerProgress),
+                        status: readerProgress >= 100 ? 'completed' : 'processing'
                       };
+                    }
 
-                      if (newProgress > 40 && newProgress <= 45 && newAgents[readerIndex].logs.length < 3) {
-                        newAgents[readerIndex].logs = [
-                          ...newAgents[readerIndex].logs,
-                          createLog('🔍 Extracting key facts and statistics...', 'info')
-                        ];
-                      } else if (newProgress > 70 && newProgress <= 75 && newAgents[readerIndex].logs.length < 4) {
-                        newAgents[readerIndex].logs = [
-                          ...newAgents[readerIndex].logs,
-                          createLog('📊 Cross-verifying information across sources...', 'info')
-                        ];
+                    // ✅ WRITER: Starts at 60% reader, 0% → 100% in 30 seconds
+                    if (writerIndex !== -1) {
+                      const readerProgress = newAgents[readerIndex]?.progress || 0;
+                      let writerProgress = 0;
+                      
+                      if (readerProgress > 60) {
+                        const writerElapsed = elapsed - 25;
+                        if (writerElapsed < 0) {
+                          writerProgress = 0;
+                        } else if (writerElapsed < 20) {
+                          writerProgress = (writerElapsed / 20) * 70;
+                        } else if (writerElapsed < 30) {
+                          writerProgress = 70 + ((writerElapsed - 20) / 10) * 30;
+                        } else {
+                          writerProgress = 100;
+                        }
                       }
-
-                      if (newProgress >= 80 && writerIndex !== -1) {
-                        newPhase = 'writing';
+                      writerProgress = Math.min(100, writerProgress);
+                      
+                      if (writerProgress > 0) {
                         newAgents[writerIndex] = {
                           ...newAgents[writerIndex],
-                          status: 'processing',
-                          progress: 10,
-                          logs: [createLog('✍️ Starting to write report...', 'info')]
+                          progress: Math.round(writerProgress),
+                          status: writerProgress >= 100 ? 'completed' : 'processing'
                         };
+                        if (newPhase !== 'writing' && writerProgress > 10) {
+                          newPhase = 'writing';
+                        }
                       }
-                    } 
-                    else if (writerIndex !== -1 && state.phase === 'writing') {
-                      const currentProgress = newAgents[writerIndex].progress;
-                      const newProgress = Math.min(95, currentProgress + 15);
-                      newAgents[writerIndex] = {
-                        ...newAgents[writerIndex],
-                        progress: newProgress,
-                      };
+                    }
 
-                      if (newProgress > 50 && newProgress <= 55 && newAgents[writerIndex].logs.length < 2) {
-                        newAgents[writerIndex].logs = [
-                          ...newAgents[writerIndex].logs,
-                          createLog('📝 Structuring report with executive summary...', 'info')
-                        ];
-                      } else if (newProgress > 70 && newProgress <= 75 && newAgents[writerIndex].logs.length < 3) {
-                        newAgents[writerIndex].logs = [
-                          ...newAgents[writerIndex].logs,
-                          createLog('📊 Adding data visualizations and tables...', 'info')
-                        ];
-                      } else if (newProgress > 90 && newAgents[writerIndex].logs.length < 4) {
-                        newAgents[writerIndex].logs = [
-                          ...newAgents[writerIndex].logs,
-                          createLog('🔧 Final proofreading and formatting...', 'info')
-                        ];
-                      }
+                    // ✅ Logs
+                    if (newAgents[readerIndex]?.progress > 40 && newAgents[readerIndex]?.logs.length < 3) {
+                      newAgents[readerIndex].logs = [
+                        ...newAgents[readerIndex].logs,
+                        createLog('🔍 Extracting key facts and statistics...', 'info')
+                      ];
+                    }
+                    if (newAgents[readerIndex]?.progress > 70 && newAgents[readerIndex]?.logs.length < 4) {
+                      newAgents[readerIndex].logs = [
+                        ...newAgents[readerIndex].logs,
+                        createLog('📊 Cross-verifying information across sources...', 'info')
+                      ];
+                    }
+                    if (newAgents[readerIndex]?.progress >= 100 && newAgents[readerIndex]?.logs.length < 5) {
+                      newAgents[readerIndex].logs = [
+                        ...newAgents[readerIndex].logs,
+                        createLog('✅ Reader analysis complete!', 'success')
+                      ];
+                    }
+                    if (newAgents[writerIndex]?.progress > 30 && newAgents[writerIndex]?.logs.length < 2) {
+                      newAgents[writerIndex].logs = [
+                        ...newAgents[writerIndex].logs,
+                        createLog('📝 Structuring report...', 'info')
+                      ];
+                    }
+                    if (newAgents[writerIndex]?.progress > 70 && newAgents[writerIndex]?.logs.length < 3) {
+                      newAgents[writerIndex].logs = [
+                        ...newAgents[writerIndex].logs,
+                        createLog('📊 Adding visualizations...', 'info')
+                      ];
+                    }
+                    if (newAgents[writerIndex]?.progress >= 100 && newAgents[writerIndex]?.logs.length < 4) {
+                      newAgents[writerIndex].logs = [
+                        ...newAgents[writerIndex].logs,
+                        createLog('✅ Report generation complete!', 'success')
+                      ];
                     }
 
                     return { agents: newAgents, phase: newPhase };
@@ -394,17 +412,14 @@ export const useAppStore = create<AppState>()(
                 }
                 set({ phase: 'idle' });
               }
-            }, 1000);
+            }, 1500);
           })
           .catch((error) => {
             console.error('Research start failed:', error);
             // Fallback to mock data
-            console.log('Using mock data fallback...');
-
             let mockProgress = 0;
             const mockInterval = window.setInterval(() => {
               mockProgress += 25;
-
               if (mockProgress >= 100) {
                 clearInterval(mockInterval);
                 set((state) => ({
@@ -416,7 +431,6 @@ export const useAppStore = create<AppState>()(
                     progress: 100
                   })),
                 }));
-
                 const newItem: ResearchHistoryItem = {
                   id: Date.now().toString(),
                   title: query.length > 40 ? query.slice(0, 40) + '…' : query,
@@ -424,7 +438,6 @@ export const useAppStore = create<AppState>()(
                   preview: MOCK_RESEARCH_RESULT.slice(0, 120) + '…',
                   result: MOCK_RESEARCH_RESULT,
                 };
-
                 set((state) => ({
                   history: [newItem, ...state.history],
                   activeHistoryId: newItem.id,
@@ -450,7 +463,7 @@ export const useAppStore = create<AppState>()(
       },
     }),
     {
-      name: 'research-storage',  // ✅ localStorage key
+      name: 'research-storage',
       partialize: (state) => ({
         isDark: state.isDark,
         history: state.history,
